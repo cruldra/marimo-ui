@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStatusBar,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -35,32 +36,57 @@ class CommandRunner(QObject):
     """在后台线程中运行命令"""
     finished = Signal(str)
     error = Signal(str)
-    
-    def __init__(self, command):
+    process_started = Signal(object)  # 发送进程对象
+
+    def __init__(self, command, working_dir=None):
         super().__init__()
         self.command = command
-    
+        self.working_dir = working_dir or Path.cwd()
+        self.process = None
+
     def run(self):
         try:
-            result = subprocess.run(
-                self.command, 
-                shell=True, 
-                capture_output=True, 
-                text=True,
-                cwd=Path.cwd()
-            )
-            if result.returncode == 0:
-                self.finished.emit(result.stdout)
+            # 对于marimo命令，使用Popen以便可以终止进程
+            if "marimo" in self.command and any(cmd in self.command for cmd in ["edit", "run", "new", "tutorial"]):
+                self.process = subprocess.Popen(
+                    self.command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=self.working_dir
+                )
+                self.process_started.emit(self.process)
+                stdout, stderr = self.process.communicate()
+
+                if self.process.returncode == 0:
+                    self.finished.emit(stdout)
+                else:
+                    self.error.emit(stderr or stdout)
             else:
-                self.error.emit(result.stderr or result.stdout)
+                # 对于其他命令，使用原来的方式
+                result = subprocess.run(
+                    self.command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=self.working_dir
+                )
+                if result.returncode == 0:
+                    self.finished.emit(result.stdout)
+                else:
+                    self.error.emit(result.stderr or result.stdout)
         except Exception as e:
             self.error.emit(str(e))
 
 
 class BaseTab(QWidget):
     """基础标签页类"""
-    def __init__(self):
+    process_started = Signal(object)  # 发送进程对象到主窗口
+
+    def __init__(self, working_dir=None):
         super().__init__()
+        self.working_dir = working_dir or Path.cwd()
         self.layout = QVBoxLayout(self)
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
@@ -77,24 +103,26 @@ class BaseTab(QWidget):
     def run_command(self, command):
         """运行命令并显示输出"""
         self.output_text.clear()
+        self.output_text.append(f"工作目录: {self.working_dir}")
         self.output_text.append(f"执行命令: {command}\n")
-        
+
         self.thread = QThread()
-        self.runner = CommandRunner(command)
+        self.runner = CommandRunner(command, self.working_dir)
         self.runner.moveToThread(self.thread)
-        
+
         self.thread.started.connect(self.runner.run)
         self.runner.finished.connect(self.on_command_finished)
         self.runner.error.connect(self.on_command_error)
+        self.runner.process_started.connect(self.process_started.emit)  # 转发进程信号
         self.runner.finished.connect(self.thread.quit)
         self.runner.error.connect(self.thread.quit)
-        
+
         self.thread.start()
     
     def on_command_finished(self, output):
         self.output_text.append("执行成功:")
         self.output_text.append(output)
-    
+
     def on_command_error(self, error):
         self.output_text.append("执行错误:")
         self.output_text.append(error)
@@ -102,8 +130,8 @@ class BaseTab(QWidget):
 
 class EditTab(BaseTab):
     """编辑标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
         self.init_ui()
         
     def init_ui(self):
@@ -191,7 +219,7 @@ class EditTab(BaseTab):
     
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择笔记本文件", "", "Python Files (*.py);;All Files (*)"
+            self, "选择笔记本文件", str(self.working_dir), "Python Files (*.py);;All Files (*)"
         )
         if file_path:
             self.file_input.setText(file_path)
@@ -235,8 +263,8 @@ class EditTab(BaseTab):
 
 class RunTab(BaseTab):
     """运行标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
         self.init_ui()
         
     def init_ui(self):
@@ -313,7 +341,7 @@ class RunTab(BaseTab):
     
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择笔记本文件", "", "Python Files (*.py);;All Files (*)"
+            self, "选择笔记本文件", str(self.working_dir), "Python Files (*.py);;All Files (*)"
         )
         if file_path:
             self.file_input.setText(file_path)
@@ -348,8 +376,8 @@ class RunTab(BaseTab):
 
 class ConvertTab(BaseTab):
     """转换标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
         self.init_ui()
 
     def init_ui(self):
@@ -399,7 +427,7 @@ class ConvertTab(BaseTab):
 
     def browse_input_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择输入文件", "",
+            self, "选择输入文件", str(self.working_dir),
             "All Supported (*.ipynb *.md *.py);;Jupyter Notebooks (*.ipynb);;Markdown Files (*.md);;Python Files (*.py);;All Files (*)"
         )
         if file_path:
@@ -407,7 +435,7 @@ class ConvertTab(BaseTab):
 
     def browse_output_file(self):
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "选择输出文件", "", "Python Files (*.py);;All Files (*)"
+            self, "选择输出文件", str(self.working_dir), "Python Files (*.py);;All Files (*)"
         )
         if file_path:
             self.output_file.setText(file_path)
@@ -427,8 +455,8 @@ class ConvertTab(BaseTab):
 
 class NewTab(BaseTab):
     """新建标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
         self.init_ui()
 
     def init_ui(self):
@@ -510,8 +538,8 @@ class NewTab(BaseTab):
 
 class ExportTab(BaseTab):
     """导出标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
         self.init_ui()
 
     def init_ui(self):
@@ -577,7 +605,7 @@ class ExportTab(BaseTab):
 
     def browse_input_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择marimo笔记本文件", "", "Python Files (*.py);;All Files (*)"
+            self, "选择marimo笔记本文件", str(self.working_dir), "Python Files (*.py);;All Files (*)"
         )
         if file_path:
             self.input_file.setText(file_path)
@@ -594,7 +622,7 @@ class ExportTab(BaseTab):
             filter_text = "Python Files (*.py);;All Files (*)"
 
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "选择输出文件", "", filter_text
+            self, "选择输出文件", str(self.working_dir), filter_text
         )
         if file_path:
             self.output_file.setText(file_path)
@@ -618,8 +646,8 @@ class ExportTab(BaseTab):
 
 class TutorialTab(BaseTab):
     """教程标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
         self.init_ui()
 
     def init_ui(self):
@@ -702,30 +730,243 @@ class TutorialTab(BaseTab):
 
 class ConfigTab(BaseTab):
     """配置标签页"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, working_dir=None):
+        super().__init__(working_dir)
+        self.config_widgets = {}
         self.init_ui()
+        self.load_current_config()
 
     def init_ui(self):
-        # 配置操作
-        config_group = QGroupBox("配置操作")
-        config_layout = QVBoxLayout()
+        # 配置操作按钮
+        actions_group = QGroupBox("配置操作")
+        actions_layout = QHBoxLayout()
 
-        show_btn = QPushButton("显示配置")
-        show_btn.clicked.connect(self.show_config)
+        load_btn = QPushButton("加载当前配置")
+        load_btn.clicked.connect(self.load_current_config)
 
-        describe_btn = QPushButton("描述配置")
-        describe_btn.clicked.connect(self.describe_config)
+        save_btn = QPushButton("保存配置")
+        save_btn.clicked.connect(self.save_config)
 
-        config_layout.addWidget(show_btn)
-        config_layout.addWidget(describe_btn)
-        config_group.setLayout(config_layout)
+        reset_btn = QPushButton("重置为默认")
+        reset_btn.clicked.connect(self.reset_config)
+
+        actions_layout.addWidget(load_btn)
+        actions_layout.addWidget(save_btn)
+        actions_layout.addWidget(reset_btn)
+        actions_group.setLayout(actions_layout)
+
+        # 保存配置
+        save_group = QGroupBox("保存设置")
+        save_layout = QFormLayout()
+
+        self.config_widgets['autosave_delay'] = QSpinBox()
+        self.config_widgets['autosave_delay'].setRange(100, 10000)
+        self.config_widgets['autosave_delay'].setValue(1000)
+        self.config_widgets['autosave_delay'].setSuffix(" ms")
+        save_layout.addRow("自动保存延迟:", self.config_widgets['autosave_delay'])
+
+        self.config_widgets['format_on_save'] = QCheckBox()
+        save_layout.addRow("保存时格式化:", self.config_widgets['format_on_save'])
+
+        self.config_widgets['autosave'] = QComboBox()
+        self.config_widgets['autosave'].addItems(["off", "after_delay", "on_edit"])
+        save_layout.addRow("自动保存模式:", self.config_widgets['autosave'])
+
+        save_group.setLayout(save_layout)
+
+        # 运行时配置
+        runtime_group = QGroupBox("运行时设置")
+        runtime_layout = QFormLayout()
+
+        self.config_widgets['watcher_on_save'] = QComboBox()
+        self.config_widgets['watcher_on_save'].addItems(["off", "lazy", "eager"])
+        runtime_layout.addRow("保存时监视:", self.config_widgets['watcher_on_save'])
+
+        self.config_widgets['reactive_tests'] = QCheckBox()
+        runtime_layout.addRow("响应式测试:", self.config_widgets['reactive_tests'])
+
+        self.config_widgets['auto_reload'] = QComboBox()
+        self.config_widgets['auto_reload'].addItems(["off", "lazy", "eager"])
+        runtime_layout.addRow("自动重载:", self.config_widgets['auto_reload'])
+
+        self.config_widgets['output_max_bytes'] = QSpinBox()
+        self.config_widgets['output_max_bytes'].setRange(1000000, 100000000)
+        self.config_widgets['output_max_bytes'].setValue(8000000)
+        runtime_layout.addRow("输出最大字节:", self.config_widgets['output_max_bytes'])
+
+        self.config_widgets['auto_instantiate'] = QCheckBox()
+        runtime_layout.addRow("自动实例化:", self.config_widgets['auto_instantiate'])
+
+        self.config_widgets['default_sql_output'] = QComboBox()
+        self.config_widgets['default_sql_output'].addItems(["auto", "table", "chart"])
+        runtime_layout.addRow("默认SQL输出:", self.config_widgets['default_sql_output'])
+
+        self.config_widgets['on_cell_change'] = QComboBox()
+        self.config_widgets['on_cell_change'].addItems(["autorun", "lazy", "disabled"])
+        runtime_layout.addRow("单元格变化时:", self.config_widgets['on_cell_change'])
+
+        self.config_widgets['std_stream_max_bytes'] = QSpinBox()
+        self.config_widgets['std_stream_max_bytes'].setRange(100000, 10000000)
+        self.config_widgets['std_stream_max_bytes'].setValue(1000000)
+        runtime_layout.addRow("标准流最大字节:", self.config_widgets['std_stream_max_bytes'])
+
+        runtime_group.setLayout(runtime_layout)
+
+        # 格式化配置
+        formatting_group = QGroupBox("格式化设置")
+        formatting_layout = QFormLayout()
+
+        self.config_widgets['line_length'] = QSpinBox()
+        self.config_widgets['line_length'].setRange(50, 200)
+        self.config_widgets['line_length'].setValue(79)
+        formatting_layout.addRow("行长度:", self.config_widgets['line_length'])
+
+        formatting_group.setLayout(formatting_layout)
+
+        # 完成配置
+        completion_group = QGroupBox("代码完成设置")
+        completion_layout = QFormLayout()
+
+        self.config_widgets['activate_on_typing'] = QCheckBox()
+        completion_layout.addRow("输入时激活:", self.config_widgets['activate_on_typing'])
+
+        self.config_widgets['copilot'] = QCheckBox()
+        completion_layout.addRow("启用Copilot:", self.config_widgets['copilot'])
+
+        completion_group.setLayout(completion_layout)
+
+        # 键盘映射配置
+        keymap_group = QGroupBox("键盘映射设置")
+        keymap_layout = QFormLayout()
+
+        self.config_widgets['keymap_preset'] = QComboBox()
+        self.config_widgets['keymap_preset'].addItems(["default", "vim", "emacs"])
+        keymap_layout.addRow("预设:", self.config_widgets['keymap_preset'])
+
+        self.config_widgets['destructive_delete'] = QCheckBox()
+        keymap_layout.addRow("破坏性删除:", self.config_widgets['destructive_delete'])
+
+        keymap_group.setLayout(keymap_layout)
+
+        # 服务器配置
+        server_group = QGroupBox("服务器设置")
+        server_layout = QFormLayout()
+
+        self.config_widgets['browser'] = QComboBox()
+        self.config_widgets['browser'].addItems(["default", "chrome", "firefox", "safari", "edge"])
+        server_layout.addRow("浏览器:", self.config_widgets['browser'])
+
+        self.config_widgets['follow_symlink'] = QCheckBox()
+        server_layout.addRow("跟随符号链接:", self.config_widgets['follow_symlink'])
+
+        server_group.setLayout(server_layout)
+
+        # AI配置
+        ai_group = QGroupBox("AI设置")
+        ai_layout = QFormLayout()
+
+        self.config_widgets['ai_mode'] = QComboBox()
+        self.config_widgets['ai_mode'].addItems(["manual", "auto", "disabled"])
+        ai_layout.addRow("AI模式:", self.config_widgets['ai_mode'])
+
+        self.config_widgets['ai_rules'] = QLineEdit()
+        self.config_widgets['ai_rules'].setPlaceholderText("AI规则 (可选)")
+        ai_layout.addRow("AI规则:", self.config_widgets['ai_rules'])
+
+        ai_group.setLayout(ai_layout)
+
+        # 显示配置
+        display_group = QGroupBox("显示设置")
+        display_layout = QFormLayout()
+
+        self.config_widgets['dataframes'] = QComboBox()
+        self.config_widgets['dataframes'].addItems(["rich", "plain", "table"])
+        display_layout.addRow("数据框显示:", self.config_widgets['dataframes'])
+
+        self.config_widgets['code_editor_font_size'] = QSpinBox()
+        self.config_widgets['code_editor_font_size'].setRange(8, 32)
+        self.config_widgets['code_editor_font_size'].setValue(14)
+        display_layout.addRow("代码编辑器字体大小:", self.config_widgets['code_editor_font_size'])
+
+        self.config_widgets['cell_output'] = QComboBox()
+        self.config_widgets['cell_output'].addItems(["above", "below", "inline"])
+        display_layout.addRow("单元格输出位置:", self.config_widgets['cell_output'])
+
+        self.config_widgets['default_table_max_columns'] = QSpinBox()
+        self.config_widgets['default_table_max_columns'].setRange(10, 200)
+        self.config_widgets['default_table_max_columns'].setValue(50)
+        display_layout.addRow("表格最大列数:", self.config_widgets['default_table_max_columns'])
+
+        self.config_widgets['reference_highlighting'] = QCheckBox()
+        display_layout.addRow("引用高亮:", self.config_widgets['reference_highlighting'])
+
+        self.config_widgets['theme'] = QComboBox()
+        self.config_widgets['theme'].addItems(["system", "light", "dark"])
+        display_layout.addRow("主题:", self.config_widgets['theme'])
+
+        self.config_widgets['default_width'] = QComboBox()
+        self.config_widgets['default_width'].addItems(["full", "medium", "compact"])
+        display_layout.addRow("默认宽度:", self.config_widgets['default_width'])
+
+        self.config_widgets['default_table_page_size'] = QSpinBox()
+        self.config_widgets['default_table_page_size'].setRange(5, 100)
+        self.config_widgets['default_table_page_size'].setValue(10)
+        display_layout.addRow("表格页面大小:", self.config_widgets['default_table_page_size'])
+
+        display_group.setLayout(display_layout)
+
+        # 包管理配置
+        package_group = QGroupBox("包管理设置")
+        package_layout = QFormLayout()
+
+        self.config_widgets['manager'] = QComboBox()
+        self.config_widgets['manager'].addItems(["uv", "pip", "conda", "poetry"])
+        package_layout.addRow("包管理器:", self.config_widgets['manager'])
+
+        package_group.setLayout(package_layout)
+
+        # 语言服务器配置
+        lsp_group = QGroupBox("语言服务器设置")
+        lsp_layout = QFormLayout()
+
+        self.config_widgets['pylsp_enabled'] = QCheckBox()
+        lsp_layout.addRow("启用pylsp:", self.config_widgets['pylsp_enabled'])
+
+        self.config_widgets['enable_pyflakes'] = QCheckBox()
+        lsp_layout.addRow("启用pyflakes:", self.config_widgets['enable_pyflakes'])
+
+        self.config_widgets['enable_flake8'] = QCheckBox()
+        lsp_layout.addRow("启用flake8:", self.config_widgets['enable_flake8'])
+
+        self.config_widgets['enable_mypy'] = QCheckBox()
+        lsp_layout.addRow("启用mypy:", self.config_widgets['enable_mypy'])
+
+        self.config_widgets['enable_pylint'] = QCheckBox()
+        lsp_layout.addRow("启用pylint:", self.config_widgets['enable_pylint'])
+
+        self.config_widgets['enable_ruff'] = QCheckBox()
+        lsp_layout.addRow("启用ruff:", self.config_widgets['enable_ruff'])
+
+        self.config_widgets['enable_pydocstyle'] = QCheckBox()
+        lsp_layout.addRow("启用pydocstyle:", self.config_widgets['enable_pydocstyle'])
+
+        lsp_group.setLayout(lsp_layout)
 
         # 布局
         scroll = QScrollArea()
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
-        scroll_layout.addWidget(config_group)
+        scroll_layout.addWidget(actions_group)
+        scroll_layout.addWidget(save_group)
+        scroll_layout.addWidget(runtime_group)
+        scroll_layout.addWidget(formatting_group)
+        scroll_layout.addWidget(completion_group)
+        scroll_layout.addWidget(keymap_group)
+        scroll_layout.addWidget(server_group)
+        scroll_layout.addWidget(ai_group)
+        scroll_layout.addWidget(display_group)
+        scroll_layout.addWidget(package_group)
+        scroll_layout.addWidget(lsp_group)
         scroll_layout.addStretch()
 
         scroll.setWidget(scroll_widget)
@@ -734,38 +975,257 @@ class ConfigTab(BaseTab):
         self.layout.addWidget(scroll)
         self.add_output_section()
 
-    def show_config(self):
-        command = "uv run marimo config show"
-        self.run_command(command)
+    def load_current_config(self):
+        """加载当前marimo配置"""
+        self.output_text.clear()
+        self.output_text.append("正在加载当前配置...")
 
-    def describe_config(self):
-        command = "uv run marimo config describe"
-        self.run_command(command)
+        self.thread = QThread()
+        self.runner = CommandRunner("uv run marimo config show")
+        self.runner.moveToThread(self.thread)
+
+        self.thread.started.connect(self.runner.run)
+        self.runner.finished.connect(self.parse_config_output)
+        self.runner.error.connect(self.on_command_error)
+        self.runner.finished.connect(self.thread.quit)
+        self.runner.error.connect(self.thread.quit)
+
+        self.thread.start()
+
+    def parse_config_output(self, output):
+        """解析配置输出并更新表单"""
+        self.output_text.append("配置加载成功:")
+        self.output_text.append(output)
+
+        # 解析配置输出（简化版本，实际应该解析TOML格式）
+        lines = output.split('\n')
+        current_section = None
+
+        # 配置键映射
+        key_mapping = {
+            ('keymap', 'preset'): 'keymap_preset',
+            ('ai', 'mode'): 'ai_mode',
+            ('ai', 'rules'): 'ai_rules',
+            ('package_management', 'manager'): 'manager',
+            ('language_servers.pylsp', 'enabled'): 'pylsp_enabled'
+        }
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith('[') and line.endswith(']'):
+                current_section = line[1:-1]
+            elif '=' in line and current_section:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"')
+
+                # 处理布尔值
+                if value.lower() in ['true', 'false']:
+                    value = value.lower() == 'true'
+
+                # 处理数字值
+                try:
+                    if '.' not in str(value) and str(value).isdigit():
+                        value = int(value)
+                except (ValueError, TypeError):
+                    pass
+
+                # 确定控件键名
+                widget_key = key
+                section_key = (current_section, key)
+                if section_key in key_mapping:
+                    widget_key = key_mapping[section_key]
+
+                # 更新对应的控件
+                if widget_key in self.config_widgets:
+                    widget = self.config_widgets[widget_key]
+
+                    if isinstance(widget, QCheckBox):
+                        widget.setChecked(bool(value))
+                    elif isinstance(widget, QSpinBox):
+                        try:
+                            widget.setValue(int(value))
+                        except (ValueError, TypeError):
+                            pass
+                    elif isinstance(widget, QComboBox):
+                        index = widget.findText(str(value))
+                        if index >= 0:
+                            widget.setCurrentIndex(index)
+                    elif isinstance(widget, QLineEdit):
+                        widget.setText(str(value))
+
+    def save_config(self):
+        """保存配置（这里只是演示，实际需要调用marimo config set命令）"""
+        self.output_text.clear()
+        self.output_text.append("保存配置功能需要marimo支持配置写入...")
+        self.output_text.append("当前配置值:")
+
+        # 显示当前表单中的所有配置值
+        for key, widget in self.config_widgets.items():
+            if isinstance(widget, QCheckBox):
+                value = widget.isChecked()
+            elif isinstance(widget, QSpinBox):
+                value = widget.value()
+            elif isinstance(widget, QComboBox):
+                value = widget.currentText()
+            else:
+                value = "未知"
+
+            self.output_text.append(f"{key} = {value}")
+
+    def reset_config(self):
+        """重置配置为默认值"""
+        # 设置默认值
+        defaults = {
+            'autosave_delay': 1000,
+            'format_on_save': False,
+            'autosave': 'after_delay',
+            'watcher_on_save': 'lazy',
+            'reactive_tests': True,
+            'auto_reload': 'off',
+            'output_max_bytes': 8000000,
+            'auto_instantiate': True,
+            'default_sql_output': 'auto',
+            'on_cell_change': 'autorun',
+            'std_stream_max_bytes': 1000000,
+            'line_length': 79,
+            'activate_on_typing': True,
+            'copilot': False,
+            'keymap_preset': 'default',
+            'destructive_delete': True,
+            'browser': 'default',
+            'follow_symlink': False,
+            'ai_mode': 'manual',
+            'ai_rules': '',
+            'dataframes': 'rich',
+            'code_editor_font_size': 14,
+            'cell_output': 'above',
+            'default_table_max_columns': 50,
+            'reference_highlighting': False,
+            'theme': 'system',
+            'default_width': 'full',
+            'default_table_page_size': 10,
+            'manager': 'uv',
+            'pylsp_enabled': True,
+            'enable_pyflakes': False,
+            'enable_flake8': False,
+            'enable_mypy': True,
+            'enable_pylint': False,
+            'enable_ruff': True,
+            'enable_pydocstyle': False
+        }
+
+        for key, default_value in defaults.items():
+            if key in self.config_widgets:
+                widget = self.config_widgets[key]
+
+                if isinstance(widget, QCheckBox):
+                    widget.setChecked(default_value)
+                elif isinstance(widget, QSpinBox):
+                    widget.setValue(default_value)
+                elif isinstance(widget, QComboBox):
+                    index = widget.findText(str(default_value))
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+
+        self.output_text.clear()
+        self.output_text.append("配置已重置为默认值")
 
 
 class MarimoGUI(QMainWindow):
     """主窗口"""
-    def __init__(self):
+    def __init__(self, working_dir=None, project_name=None):
         super().__init__()
+        self.working_dir = working_dir or Path.cwd()
+        self.project_name = project_name or "默认项目"
+        self.running_processes = []  # 跟踪运行中的进程
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("Marimo GUI")
-        self.setGeometry(100, 100, 900, 700)
+        self.setWindowTitle(f"Marimo GUI - {self.project_name}")
+        self.setGeometry(100, 100, 1498, 1075)
+
+        # 创建主控件
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
 
         # 创建标签页
         tab_widget = QTabWidget()
 
-        # 添加各个标签页
-        tab_widget.addTab(EditTab(), "编辑 (Edit)")
-        tab_widget.addTab(RunTab(), "运行 (Run)")
-        tab_widget.addTab(NewTab(), "新建 (New)")
-        tab_widget.addTab(ConvertTab(), "转换 (Convert)")
-        tab_widget.addTab(ExportTab(), "导出 (Export)")
-        tab_widget.addTab(TutorialTab(), "教程 (Tutorial)")
-        tab_widget.addTab(ConfigTab(), "配置 (Config)")
+        # 添加各个标签页，传递工作目录
+        edit_tab = EditTab(self.working_dir)
+        run_tab = RunTab(self.working_dir)
+        new_tab = NewTab(self.working_dir)
+        convert_tab = ConvertTab(self.working_dir)
+        export_tab = ExportTab(self.working_dir)
+        tutorial_tab = TutorialTab(self.working_dir)
+        config_tab = ConfigTab(self.working_dir)
 
-        self.setCentralWidget(tab_widget)
+        # 连接进程信号
+        edit_tab.process_started.connect(self.add_process)
+        run_tab.process_started.connect(self.add_process)
+        new_tab.process_started.connect(self.add_process)
+        tutorial_tab.process_started.connect(self.add_process)
+
+        tab_widget.addTab(edit_tab, "编辑 (Edit)")
+        tab_widget.addTab(run_tab, "运行 (Run)")
+        tab_widget.addTab(new_tab, "新建 (New)")
+        tab_widget.addTab(convert_tab, "转换 (Convert)")
+        tab_widget.addTab(export_tab, "导出 (Export)")
+        tab_widget.addTab(tutorial_tab, "教程 (Tutorial)")
+        tab_widget.addTab(config_tab, "配置 (Config)")
+
+        main_layout.addWidget(tab_widget)
+
+        # 创建状态栏
+        self.create_status_bar()
+
+    def create_status_bar(self):
+        """创建状态栏并显示项目信息"""
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        # 显示项目信息
+        project_info_text = f"当前项目: {self.project_name} | 工作目录: {self.working_dir}"
+        self.status_bar.showMessage(project_info_text)
+
+        # 添加进程计数标签
+        self.process_count_label = QLabel("运行进程: 0")
+        self.status_bar.addPermanentWidget(self.process_count_label)
+
+    def add_process(self, process):
+        """添加进程到跟踪列表"""
+        self.running_processes.append(process)
+        self.update_process_count()
+
+    def update_process_count(self):
+        """更新状态栏中的进程计数"""
+        # 清理已结束的进程
+        self.running_processes = [p for p in self.running_processes if p.poll() is None]
+        count = len(self.running_processes)
+        self.process_count_label.setText(f"运行进程: {count}")
+
+    def terminate_all_processes(self):
+        """终止所有运行中的进程"""
+        for process in self.running_processes:
+            try:
+                if process.poll() is None:  # 进程仍在运行
+                    process.terminate()
+                    # 等待进程终止，如果超时则强制杀死
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+            except Exception as e:
+                print(f"终止进程时出错: {e}")
+        self.running_processes.clear()
+        self.update_process_count()
+
+    def closeEvent(self, event):
+        """窗口关闭事件处理"""
+        self.terminate_all_processes()
+        event.accept()
 
 
 def main():
