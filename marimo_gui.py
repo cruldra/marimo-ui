@@ -36,53 +36,31 @@ class CommandRunner(QObject):
     """在后台线程中运行命令"""
     finished = Signal(str)
     error = Signal(str)
-    process_started = Signal(object)  # 发送进程对象
 
     def __init__(self, command, working_dir=None):
         super().__init__()
         self.command = command
         self.working_dir = working_dir or Path.cwd()
-        self.process = None
 
     def run(self):
         try:
-            # 对于marimo命令，使用Popen以便可以终止进程
-            if "marimo" in self.command and any(cmd in self.command for cmd in ["edit", "run", "new", "tutorial"]):
-                self.process = subprocess.Popen(
-                    self.command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=self.working_dir
-                )
-                self.process_started.emit(self.process)
-                stdout, stderr = self.process.communicate()
-
-                if self.process.returncode == 0:
-                    self.finished.emit(stdout)
-                else:
-                    self.error.emit(stderr or stdout)
+            result = subprocess.run(
+                self.command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.working_dir
+            )
+            if result.returncode == 0:
+                self.finished.emit(result.stdout)
             else:
-                # 对于其他命令，使用原来的方式
-                result = subprocess.run(
-                    self.command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=self.working_dir
-                )
-                if result.returncode == 0:
-                    self.finished.emit(result.stdout)
-                else:
-                    self.error.emit(result.stderr or result.stdout)
+                self.error.emit(result.stderr or result.stdout)
         except Exception as e:
             self.error.emit(str(e))
 
 
 class BaseTab(QWidget):
     """基础标签页类"""
-    process_started = Signal(object)  # 发送进程对象到主窗口
 
     def __init__(self, working_dir=None):
         super().__init__()
@@ -113,7 +91,6 @@ class BaseTab(QWidget):
         self.thread.started.connect(self.runner.run)
         self.runner.finished.connect(self.on_command_finished)
         self.runner.error.connect(self.on_command_error)
-        self.runner.process_started.connect(self.process_started.emit)  # 转发进程信号
         self.runner.finished.connect(self.thread.quit)
         self.runner.error.connect(self.thread.quit)
 
@@ -1138,7 +1115,6 @@ class MarimoGUI(QMainWindow):
         super().__init__()
         self.working_dir = working_dir or Path.cwd()
         self.project_name = project_name or "默认项目"
-        self.running_processes = []  # 跟踪运行中的进程
         self.init_ui()
 
     def init_ui(self):
@@ -1162,11 +1138,7 @@ class MarimoGUI(QMainWindow):
         tutorial_tab = TutorialTab(self.working_dir)
         config_tab = ConfigTab(self.working_dir)
 
-        # 连接进程信号
-        edit_tab.process_started.connect(self.add_process)
-        run_tab.process_started.connect(self.add_process)
-        new_tab.process_started.connect(self.add_process)
-        tutorial_tab.process_started.connect(self.add_process)
+
 
         tab_widget.addTab(edit_tab, "编辑 (Edit)")
         tab_widget.addTab(run_tab, "运行 (Run)")
@@ -1190,42 +1162,7 @@ class MarimoGUI(QMainWindow):
         project_info_text = f"当前项目: {self.project_name} | 工作目录: {self.working_dir}"
         self.status_bar.showMessage(project_info_text)
 
-        # 添加进程计数标签
-        self.process_count_label = QLabel("运行进程: 0")
-        self.status_bar.addPermanentWidget(self.process_count_label)
 
-    def add_process(self, process):
-        """添加进程到跟踪列表"""
-        self.running_processes.append(process)
-        self.update_process_count()
-
-    def update_process_count(self):
-        """更新状态栏中的进程计数"""
-        # 清理已结束的进程
-        self.running_processes = [p for p in self.running_processes if p.poll() is None]
-        count = len(self.running_processes)
-        self.process_count_label.setText(f"运行进程: {count}")
-
-    def terminate_all_processes(self):
-        """终止所有运行中的进程"""
-        for process in self.running_processes:
-            try:
-                if process.poll() is None:  # 进程仍在运行
-                    process.terminate()
-                    # 等待进程终止，如果超时则强制杀死
-                    try:
-                        process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-            except Exception as e:
-                print(f"终止进程时出错: {e}")
-        self.running_processes.clear()
-        self.update_process_count()
-
-    def closeEvent(self, event):
-        """窗口关闭事件处理"""
-        self.terminate_all_processes()
-        event.accept()
 
 
 def main():
