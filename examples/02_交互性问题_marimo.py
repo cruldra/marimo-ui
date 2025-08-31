@@ -9,6 +9,15 @@ def _():
     import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
+
+    # 设置 matplotlib 使用支持中文的字体
+    # 'Microsoft YaHei' 是 Windows 系统中常见的字体
+    # 如果您使用 macOS，可以尝试 'PingFang SC'
+    # 如果您使用 Linux，可以尝试 'WenQuanYi Micro Hei'
+    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei'] 
+
+    # 解决负号 '-' 显示为方块的问题
+    plt.rcParams['axes.unicode_minus'] = False 
     return mo, np, plt
 
 
@@ -89,7 +98,7 @@ def _(mo, operation, x_slider, y_slider):
         calc_result = x_val ** y_val
 
     mo.md(f"**{x_val} {op} {y_val} = {calc_result:.2f}**")
-    return calc_result, op, x_val, y_val
+    return op, x_val, y_val
 
 
 @app.cell
@@ -156,7 +165,7 @@ def _(current_data, plt):
     hist_ax.grid(True, alpha=0.3)
 
     hist_fig
-    return hist_ax, hist_fig
+    return
 
 
 @app.cell
@@ -186,7 +195,7 @@ def _(analysis_type, current_data, mo, np):
         analysis_result = np.min(current_data)
 
     mo.md(f"**{analysis}**: {analysis_result:.4f}")
-    return analysis, analysis_result
+    return
 
 
 @app.cell

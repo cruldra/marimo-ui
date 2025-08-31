@@ -34,7 +34,7 @@ def _(mo):
 @app.cell
 def _():
     # 定义变量x
-    x = 15
+    x = 10
     print(f"x = {x}")
     return (x,)
 
